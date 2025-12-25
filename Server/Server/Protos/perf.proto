@@ -1,0 +1,32 @@
+syntax = "proto3";
+
+option csharp_namespace = "Server.Grpc";
+
+package perf;
+
+message PerfNested {
+  string description = 1;
+  int64 long_value = 2;
+}
+
+service Perf {
+  rpc Ping (PingRequest) returns (PingReply);
+}
+
+message PingRequest {
+  string message = 1;
+  int32 count = 2;
+  double value = 3;
+  bool is_active = 4;
+  repeated string tags = 5;
+  PerfNested nested = 6;
+}
+
+message PingReply {
+  string message = 1;
+  int32 count = 2;
+  double value = 3;
+  bool is_active = 4;
+  repeated string tags = 5;
+  PerfNested nested = 6;
+}

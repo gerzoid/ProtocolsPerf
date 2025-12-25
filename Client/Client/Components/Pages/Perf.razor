@@ -1,0 +1,289 @@
+@page "/"
+@page "/perf"
+@rendermode InteractiveServer
+
+<PageTitle>Protocols performance</PageTitle>
+
+<h1>Protocols performance tests</h1>
+
+<FluentStack Orientation="Orientation.Vertical" Gap="10">
+    <FluentTextField @bind-Value="RestUrl" Label="REST URL" />
+    <FluentTextField @bind-Value="SignalRUrl" Label="SignalR hub URL" />
+    <FluentTextField @bind-Value="GrpcUrl" Label="gRPC base URL" />
+    <FluentNumberField @bind-Value="RequestCount" Label="Request count" Min="1" />
+    <FluentStack Orientation="Orientation.Horizontal" Gap="10">
+        <FluentButton Appearance="Appearance.Accent" @onclick="RunRestTest">Test REST</FluentButton>
+        <FluentButton Appearance="Appearance.Accent" @onclick="RunSignalRTest">Test SignalR</FluentButton>
+        <FluentButton Appearance="Appearance.Accent" @onclick="RunGrpcTest">Test gRPC</FluentButton>
+        <FluentButton @onclick="RunAllTests">Test all</FluentButton>
+    </FluentStack>
+</FluentStack>
+
+@if (IsRunning)
+{
+    <p>Running tests...</p>
+}
+
+@if (Results.Any())
+{
+    <table class="table">
+        <thead>
+            <tr>
+                <th>Protocol</th>
+                <th>Requests</th>
+                <th>Success</th>
+                <th>Errors</th>
+                <th>Total ms</th>
+                <th>Avg ms</th>
+                <th>Min ms</th>
+                <th>Max ms</th>
+            </tr>
+        </thead>
+        <tbody>
+        @foreach (var r in Results)
+        {
+            <tr>
+                <td>@r.Protocol</td>
+                <td>@r.RequestCount</td>
+                <td>@r.SuccessCount</td>
+                <td>@r.ErrorCount</td>
+                <td>@r.TotalMilliseconds</td>
+                <td>@r.AverageMilliseconds</td>
+                <td>@r.MinMilliseconds</td>
+                <td>@r.MaxMilliseconds</td>
+            </tr>
+        }
+        </tbody>
+    </table>
+}
+@if (!string.IsNullOrEmpty(GrpcLastError))
+{
+    <p>Last gRPC error: @GrpcLastError</p>
+}
+
+@code {
+    private string RestUrl { get; set; } = "https://localhost:7238/api/PerfRest/ping";
+    private string SignalRUrl { get; set; } = "https://localhost:7238/perfhub";
+    private string GrpcUrl { get; set; } = "https://localhost:7238";
+    private int RequestCount { get; set; } = 100;
+    private bool IsRunning { get; set; }
+
+    private string? GrpcLastError { get; set; }
+
+    private List<PerfResult> Results { get; } = new();
+
+    [Inject]
+    private IHttpClientFactory HttpClientFactory { get; set; } = default!;
+
+    private static PerfPayload CreatePayload(int index)
+    {
+        return new PerfPayload
+        {
+            Id = Guid.NewGuid(),
+            Name = $"Item-{index}",
+            Count = index,
+            Value = index * 0.1,
+            IsActive = index % 2 == 0,
+            Timestamp = DateTime.UtcNow,
+            Tags = new[] { "perf", "test", $"idx-{index}" },
+            Nested = new PerfNested
+            {
+                Description = "Nested payload",
+                LongValue = index * 1000L
+            }
+        };
+    }
+
+    private async Task RunAllTests()
+    {
+        IsRunning = true;
+        GrpcLastError = null;
+        Results.Clear();
+    
+        await RunRestTest();
+        await RunSignalRTest();
+        await RunGrpcTest();
+
+        IsRunning = false;
+    }
+
+    private async Task RunRestTest()
+    {
+        var client = HttpClientFactory.CreateClient();
+
+        var measurements = new List<double>();
+        var success = 0;
+        var errors = 0;
+
+        for (var i = 0; i < RequestCount; i++)
+        {
+            var stopwatch = Stopwatch.StartNew();
+            try
+            {
+                var payload = CreatePayload(i);
+                var response = await client.PostAsJsonAsync(RestUrl, payload);
+                response.EnsureSuccessStatusCode();
+                _ = await response.Content.ReadAsStringAsync();
+                success++;
+            }
+            catch
+            {
+                errors++;
+            }
+            finally
+            {
+                stopwatch.Stop();
+                measurements.Add(stopwatch.Elapsed.TotalMilliseconds);
+            }
+        }
+
+        Results.Add(PerfResult.From("REST", RequestCount, success, errors, measurements));
+    }
+
+    private async Task RunSignalRTest()
+    {
+        var connection = new HubConnectionBuilder()
+            .WithUrl(SignalRUrl)
+            .WithAutomaticReconnect()
+            .Build();
+
+        await connection.StartAsync();
+
+        var measurements = new List<double>();
+        var success = 0;
+        var errors = 0;
+
+        for (var i = 0; i < RequestCount; i++)
+        {
+            var stopwatch = Stopwatch.StartNew();
+            try
+            {
+                var payload = CreatePayload(i);
+                _ = await connection.InvokeAsync<PerfPayload>("EchoPayload", payload);
+                success++;
+            }
+            catch
+            {
+                errors++;
+            }
+            finally
+            {
+                stopwatch.Stop();
+                measurements.Add(stopwatch.Elapsed.TotalMilliseconds);
+            }
+        }
+
+        await connection.DisposeAsync();
+
+        Results.Add(PerfResult.From("SignalR", RequestCount, success, errors, measurements));
+    }
+
+    private async Task RunGrpcTest()
+    {
+        using var channel = GrpcChannel.ForAddress(GrpcUrl);
+        var client = new Server.Grpc.Perf.PerfClient(channel);
+
+        var measurements = new List<double>();
+        var success = 0;
+        var errors = 0;
+
+        for (var i = 0; i < RequestCount; i++)
+        {
+            var stopwatch = Stopwatch.StartNew();
+            try
+            {
+                var request = new PingRequest
+                {
+                    Message = "test",
+                    Count = i,
+                    Value = i * 0.1,
+                    IsActive = i % 2 == 0,
+                    Nested = new Server.Grpc.PerfNested
+                    {
+                        Description = "Nested payload",
+                        LongValue = i * 1000L
+                    }
+                };
+        
+                request.Tags.Add("perf");
+                request.Tags.Add("test");
+                request.Tags.Add($"idx-{i}");
+        
+                var reply = await client.PingAsync(request);
+                if (reply is not null)
+                {
+                    success++;
+                }
+            }
+            catch (Exception ex)
+            {
+                errors++;
+                if (ex is Grpc.Core.RpcException rpcEx)
+                {
+                    GrpcLastError = $"{rpcEx.StatusCode}: {rpcEx.Status.Detail}";
+                }
+                else
+                {
+                    GrpcLastError = ex.Message;
+                }
+            }
+            finally
+            {
+                stopwatch.Stop();
+                measurements.Add(stopwatch.Elapsed.TotalMilliseconds);
+            }
+        }
+        
+        Results.Add(PerfResult.From("gRPC", RequestCount, success, errors, measurements));
+    }
+
+    private sealed class PerfResult
+    {
+        public string Protocol { get; init; } = string.Empty;
+        public int RequestCount { get; init; }
+        public int SuccessCount { get; init; }
+        public int ErrorCount { get; init; }
+        public double TotalMilliseconds { get; init; }
+        public double AverageMilliseconds { get; init; }
+        public double MinMilliseconds { get; init; }
+        public double MaxMilliseconds { get; init; }
+
+        public static PerfResult From(string protocol, int requestCount, int successCount, int errorCount, List<double> measurements)
+        {
+            var total = measurements.Sum();
+            var average = measurements.Count > 0 ? measurements.Average() : 0;
+            var min = measurements.Count > 0 ? measurements.Min() : 0;
+            var max = measurements.Count > 0 ? measurements.Max() : 0;
+
+            return new PerfResult
+            {
+                Protocol = protocol,
+                RequestCount = requestCount,
+                SuccessCount = successCount,
+                ErrorCount = errorCount,
+                TotalMilliseconds = Math.Round(total, 2),
+                AverageMilliseconds = Math.Round(average, 2),
+                MinMilliseconds = Math.Round(min, 2),
+                MaxMilliseconds = Math.Round(max, 2)
+            };
+        }
+    }
+
+    private sealed class PerfPayload
+    {
+        public Guid Id { get; set; }
+        public string Name { get; set; } = string.Empty;
+        public int Count { get; set; }
+        public double Value { get; set; }
+        public bool IsActive { get; set; }
+        public DateTime Timestamp { get; set; }
+        public PerfNested Nested { get; set; } = new();
+        public string[] Tags { get; set; } = Array.Empty<string>();
+    }
+
+    private sealed class PerfNested
+    {
+        public string Description { get; set; } = string.Empty;
+        public long LongValue { get; set; }
+    }
+}
